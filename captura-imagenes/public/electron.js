@@ -1,55 +1,45 @@
 // ===== public/electron.js =====
 // Este archivo configura Electron para poder guardar archivos localmente
 
-const { app, BrowserWindow, ipcMain } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const isDev = require('electron-is-dev');
-const os = require('os');
+const url = require('url');
 
-// Configurar ruta de guardado específica
-let savePath = 'C:\\Users\\Adrian\\Desktop\\reyi\\inesdataset_final\\data';
+let mainWindow;
 
 function createWindow() {
-  // Crear ventana de la aplicación
-  const mainWindow = new BrowserWindow({
-    width: 1024,
-    height: 768,
+  mainWindow = new BrowserWindow({
+    width: 900,
+    height: 680,
     webPreferences: {
-      nodeIntegration: false,
-      contextIsolation: true,
-      enableRemoteModule: false,
-      preload: path.join(__dirname, '../src/preload.js')
+      nodeIntegration: true,
+      contextIsolation: false,
+      enableRemoteModule: true,
     }
   });
 
-  // Cargar la app de React
-  mainWindow.loadURL(
-    isDev
-      ? 'http://localhost:3000'
-      : `file://${path.join(__dirname, '../build/index.html')}`
-  );
+  const startUrl = isDev
+    ? 'http://localhost:3000'
+    : url.format({
+        pathname: path.join(__dirname, '../build/index.html'),
+        protocol: 'file:',
+        slashes: true,
+      });
 
-  // Abrir DevTools en desarrollo
+  mainWindow.loadURL(startUrl);
+
+  // Abre DevTools si está en desarrollo
   if (isDev) {
     mainWindow.webContents.openDevTools();
   }
+
+  mainWindow.on('closed', () => (mainWindow = null));
 }
 
-// Crear la carpeta de guardado si no existe
-function ensureSaveDirectory() {
-  if (!fs.existsSync(savePath)) {
-    fs.mkdirSync(savePath, { recursive: true });
-  }
-}
+app.on('ready', createWindow);
 
-// Iniciar la aplicación
-app.whenReady().then(() => {
-  createWindow();
-  ensureSaveDirectory();
-});
-
-// Manejar cierre de la aplicación
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
     app.quit();
@@ -57,99 +47,64 @@ app.on('window-all-closed', () => {
 });
 
 app.on('activate', () => {
-  if (BrowserWindow.getAllWindows().length === 0) {
+  if (mainWindow === null) {
     createWindow();
   }
 });
 
-// Manejar la selección de ruta de guardado
-ipcMain.handle('set-save-path', async (event, newPath) => {
-  if (newPath && fs.existsSync(newPath)) {
-    savePath = newPath;
-    ensureSaveDirectory();
-    return { success: true, path: savePath };
-  }
-  return { success: false, error: 'La ruta no existe' };
-});
-
-// Obtener la ruta de guardado actual
-ipcMain.handle('get-save-path', async (event) => {
-  return savePath;
-});
-
-// Guardar la imagen en la ruta configurada
-ipcMain.handle('save-image', async (event, imageData) => {
+// Función para obtener archivos en la carpeta por su extensión
+function getNextSequentialNumber(folder, extension = '.jpg') {
   try {
-    ensureSaveDirectory();
-    
-    // Obtener el siguiente número de archivo
-    const files = fs.readdirSync(savePath).filter(file => 
-      file.match(/^\d{3}\.jpg$/)
-    );
-    
-    // Encontrar el número más alto
-    let maxNumber = 0;
-    files.forEach(file => {
-      const fileNumber = parseInt(file.substring(0, 3));
-      if (fileNumber > maxNumber) {
-        maxNumber = fileNumber;
-      }
-    });
-    
-    // Crear el siguiente número
-    const nextNumber = maxNumber + 1;
-    const fileName = `${nextNumber.toString().padStart(3, '0')}.jpg`;
-    
-    // Guardar la imagen
-    const base64Data = imageData.replace(/^data:image\/jpeg;base64,/, '');
-    const filePath = path.join(savePath, fileName);
-    
-    fs.writeFileSync(filePath, base64Data, 'base64');
-    
-    return {
-      success: true,
-      fileName,
-      fullPath: filePath,
-      nextIndex: nextNumber
-    };
-  } catch (error) {
-    console.error('Error al guardar:', error);
-    return {
-      success: false,
-      error: error.message
-    };
-  }
-});
+    if (!fs.existsSync(folder)) {
+      fs.mkdirSync(folder, { recursive: true });
+      return 1;
+    }
 
-// Listar imágenes guardadas y obtener el siguiente número a usar
-ipcMain.handle('get-next-image-number', async () => {
-  try {
-    ensureSaveDirectory();
-    
-    const files = fs.readdirSync(savePath)
-      .filter(file => file.match(/^\d{3}\.jpg$/));
-      
-    // Encontrar el número más alto
-    let maxNumber = 0;
-    files.forEach(file => {
-      const fileNumber = parseInt(file.substring(0, 3));
-      if (fileNumber > maxNumber) {
-        maxNumber = fileNumber;
-      }
-    });
-    
-    // El siguiente número será el más alto + 1
-    return {
-      success: true,
-      nextNumber: maxNumber + 1,
-      count: files.length
-    };
+    const files = fs.readdirSync(folder)
+      .filter(file => file.endsWith(extension))
+      .filter(file => /^\d+\.jpg$/.test(file))
+      .map(file => parseInt(file.split('.')[0], 10))
+      .filter(num => !isNaN(num));
+
+    if (files.length === 0) {
+      return 1;
+    }
+
+    return Math.max(...files) + 1;
   } catch (error) {
-    return {
-      success: false,
-      error: error.message,
-      nextNumber: 1,
-      count: 0
-    };
+    console.error('Error al obtener el siguiente número de archivo:', error);
+    return 1;
+  }
+}
+
+// Manejar el evento para guardar imagen
+ipcMain.on('save-photo', (event, imageData) => {
+  try {
+    const folder = 'C:\\Users\\Adrian\\Desktop\\reyi\\inesdataset_final\\data';
+    
+    // Asegurarse de que la carpeta existe
+    if (!fs.existsSync(folder)) {
+      fs.mkdirSync(folder, { recursive: true });
+    }
+
+    // Obtener el siguiente número secuencial
+    const nextNumber = getNextSequentialNumber(folder);
+    
+    // Formatear el número con ceros a la izquierda
+    const formattedNumber = String(nextNumber).padStart(3, '0');
+    const fileName = `${formattedNumber}.jpg`;
+    const filePath = path.join(folder, fileName);
+
+    // Convertir la imagen base64 a un buffer
+    const base64Data = imageData.replace(/^data:image\/\w+;base64,/, '');
+    const buffer = Buffer.from(base64Data, 'base64');
+
+    // Guardar el archivo
+    fs.writeFileSync(filePath, buffer);
+
+    event.reply('photo-saved', { success: true, fileName });
+  } catch (error) {
+    console.error('Error al guardar la foto:', error);
+    event.reply('photo-saved', { success: false, error: error.message });
   }
 });

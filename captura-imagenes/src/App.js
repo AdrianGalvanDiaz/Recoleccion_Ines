@@ -1,20 +1,22 @@
-// ===== src/App.js =====
-// Componente principal de la aplicación React
-
 import React, { useState, useRef, useCallback, useEffect } from 'react';
 import Webcam from 'react-webcam';
 import './App.css';
 
+// Obtenemos acceso al IPC de Electron
+const { ipcRenderer } = window.require('electron');
+
 function App() {
-  // Estado para la cámara
+  // Estados para la cámara
   const [devices, setDevices] = useState([]);
   const [selectedDeviceId, setSelectedDeviceId] = useState(null);
   const [isCameraEnabled, setIsCameraEnabled] = useState(false);
   const [imgSrc, setImgSrc] = useState(null);
   const [resolution, setResolution] = useState({ width: 0, height: 0 });
   const [resolutionStatus, setResolutionStatus] = useState('checking');
+  const [saveStatus, setSaveStatus] = useState({ message: '', type: '' });
+  const [captureCount, setCaptureCount] = useState(0);
   
-  // Lista de resoluciones
+  // Lista de resoluciones en orden descendente (de mejor a peor)
   const [availableResolutions] = useState([
     { width: 1920, height: 1080, label: "Full HD (1920x1080)" },
     { width: 1280, height: 720, label: "HD (1280x720)" },
@@ -22,19 +24,9 @@ function App() {
   ]);
   
   // Iniciar con la resolución Full HD por defecto
-  const [selectedResolution, setSelectedResolution] = useState(
-    { width: 1920, height: 1080, label: "Full HD (1920x1080)" }
-  );
+  const [selectedResolution, setSelectedResolution] = useState({ width: 1920, height: 1080, label: "Full HD (1920x1080)" });
   
-  // Referencia al componente webcam
   const webcamRef = useRef(null);
-  
-  // Estado para el guardado de imágenes
-  const [savePath, setSavePath] = useState('');
-  const [saving, setSaving] = useState(false);
-  const [lastSaved, setLastSaved] = useState(null);
-  const [errorMessage, setErrorMessage] = useState(null);
-  const [totalImages, setTotalImages] = useState(0);
   
   // Función para obtener los dispositivos disponibles
   const handleDevices = useCallback(
@@ -51,7 +43,7 @@ function App() {
     navigator.mediaDevices.enumerateDevices().then(handleDevices);
   };
 
-  // Intentar diferentes resoluciones
+  // Nueva función para intentar diferentes resoluciones
   const tryNextResolution = useCallback(async (currentResolutionIndex = 0) => {
     if (currentResolutionIndex >= availableResolutions.length) {
       console.error('No se pudo establecer ninguna resolución');
@@ -102,7 +94,7 @@ function App() {
     }, 100);
   };
 
-  // Capturar imagen con Canvas a resolución completa
+  // Función para capturar imagen con Canvas a resolución completa
   const captureWithCanvas = () => {
     const video = webcamRef.current.video;
     const canvas = document.createElement('canvas');
@@ -117,37 +109,30 @@ function App() {
     // Dibujar el frame actual del video en el canvas
     context.drawImage(video, 0, 0, canvas.width, canvas.height);
   
-    // Convertir a base64 como JPEG para menor tamaño
-    const imageSrc = canvas.toDataURL('image/jpeg', 0.9);
+    // Convertir a base64
+    const imageSrc = canvas.toDataURL('image/jpeg', 0.95); // Alta calidad
     
     return imageSrc;
   };
 
-  // Efecto para cargar la ruta de guardado al inicio
-  useEffect(() => {
-    const loadSavePath = async () => {
-      if (window.electronAPI) {
-        try {
-          const path = await window.electronAPI.getSavePath();
-          setSavePath(path);
-          
-          // Cargar conteo de imágenes
-          const imageList = await window.electronAPI.listImages();
-          if (imageList.success) {
-            setTotalImages(imageList.count);
-          }
-        } catch (error) {
-          console.error('Error al cargar la ruta:', error);
-        }
-      } else {
-        console.warn('No se detectó Electron, la app funcionará en modo navegador sin guardado local');
-      }
-    };
-    
-    loadSavePath();
-  }, []);
+  // Capturar imagen y guardarla
+  const capture = useCallback(() => {
+    try {
+      const imageSrc = captureWithCanvas();
+      setImgSrc(imageSrc);
+      
+      // Enviar la imagen a través de IPC para guardarla
+      ipcRenderer.send('save-photo', imageSrc);
+      
+      // Actualizar el estado para mostrar que se está guardando
+      setSaveStatus({ message: 'Guardando imagen...', type: 'loading' });
+    } catch (error) {
+      console.error('Error al capturar la imagen:', error);
+      setSaveStatus({ message: `Error: ${error.message}`, type: 'error' });
+    }
+  }, [webcamRef]);
   
-  // Renderizar la información de resolución
+  // Función para renderizar la información de resolución
   const renderResolutionInfo = () => {
     if (resolution.width > 0) {
       return (
@@ -171,6 +156,28 @@ function App() {
     
     return null;
   };
+
+  // Escuchar la respuesta del proceso de guardado
+  useEffect(() => {
+    ipcRenderer.on('photo-saved', (event, result) => {
+      if (result.success) {
+        setSaveStatus({ 
+          message: `Imagen ${result.fileName} guardada correctamente`, 
+          type: 'success'
+        });
+        setCaptureCount(prev => prev + 1);
+      } else {
+        setSaveStatus({ 
+          message: `Error al guardar la imagen: ${result.error}`, 
+          type: 'error'
+        });
+      }
+    });
+
+    return () => {
+      ipcRenderer.removeAllListeners('photo-saved');
+    };
+  }, []);
 
   // Actualizar efecto para detectar cuando la resolución real esté disponible
   useEffect(() => {
@@ -201,164 +208,93 @@ function App() {
     }
   }, [isCameraEnabled, webcamRef]);
 
-  // Función para capturar y guardar la imagen
-  const captureAndSave = async () => {
-    try {
-      // Capturar la imagen
-      const imageSrc = captureWithCanvas();
-      setImgSrc(imageSrc);
-      
-      // Activar estado de guardado
-      setSaving(true);
-      setErrorMessage(null);
-      
-      if (window.electronAPI) {
-        // Guardar la imagen usando Electron
-        const result = await window.electronAPI.saveImage(imageSrc);
-        
-        if (result.success) {
-          setLastSaved({
-            fileName: result.fileName,
-            path: result.fullPath,
-            index: result.nextIndex
-          });
-          setTotalImages(prev => prev + 1);
-        } else {
-          setErrorMessage(`Error al guardar: ${result.error}`);
-        }
-      } else {
-        // Modo web (sin guardado local)
-        // Simular guardado con descarga
-        const link = document.createElement('a');
-        const nextIndex = totalImages + 1;
-        const fileName = `${nextIndex.toString().padStart(3, '0')}.jpg`;
-        
-        link.href = imageSrc;
-        link.download = fileName;
-        link.click();
-        
-        setLastSaved({
-          fileName: fileName,
-          path: 'Descargada en su navegador',
-          index: nextIndex
-        });
-        setTotalImages(prev => prev + 1);
-      }
-      
-      // Desactivar estado de guardado
-      setSaving(false);
-    } catch (error) {
-      console.error('Error al capturar/guardar:', error);
-      setErrorMessage(`Error: ${error.message}`);
-      setSaving(false);
-    }
-  };
-
   return (
     <div className="App">
-      <div className="capture-page">
-        <h1>Captura de Imágenes</h1>
-        
-        {/* Contador de imágenes */}
-        <div className="image-counter">
-          Total de imágenes capturadas: <strong>{totalImages}</strong>
+      <h1>Captura de Fotos para Dataset</h1>
+      
+      {/* Botón para listar dispositivos */}
+      {!isCameraEnabled && (
+        <div className="devices-container">
+          <button onClick={loadDevices} className="btn">
+            Iniciar Nueva Captura
+          </button>
+          
+          <div className="device-list">
+            {devices.map((device, key) => (
+              <div key={key} className="device-item">
+                <span>{device.label || `Dispositivo ${key + 1}`}</span>
+                <button onClick={() => enableCamera(device.deviceId)} className="btn">
+                  Seleccionar
+                </button>
+              </div>
+            ))}
+          </div>
         </div>
-        
-        {/* Muestra la ruta de guardado */}
-        {savePath && (
-          <div className="save-path-info">
-            Guardando en: <strong>{savePath}</strong>
-          </div>
-        )}
-        
-        {/* Botón para listar dispositivos */}
-        {!isCameraEnabled && (
-          <div className="devices-container">
-            <button onClick={loadDevices} className="btn">
-              Iniciar captura
-            </button>
+      )}
+
+      {/* Cámara */}
+      {isCameraEnabled && (
+        <div className="camera-container">
+          <div className="webcam-wrapper">
+            <Webcam
+              audio={false}
+              ref={webcamRef}
+              screenshotFormat="image/jpeg"
+              videoConstraints={{
+                deviceId: selectedDeviceId,
+                width: { ideal: selectedResolution.width },
+                height: { ideal: selectedResolution.height }
+              }}
+              className="webcam"
+            />
             
-            <div className="device-list">
-              {devices.map((device, key) => (
-                <div key={key} className="device-item">
-                  <span>{device.label || `Dispositivo ${key + 1}`}</span>
-                  <button onClick={() => enableCamera(device.deviceId)} className="btn">
-                    Seleccionar
-                  </button>
-                </div>
-              ))}
-            </div>
+            {/* Mostrar la información de resolución actualizada */}
+            {renderResolutionInfo()}
           </div>
-        )}
 
-        {/* Cámara */}
-        {isCameraEnabled && (
-          <div className="camera-container">
-            <div className="webcam-wrapper">
-              <Webcam
-                audio={false}
-                ref={webcamRef}
-                screenshotFormat="image/jpeg"
-                videoConstraints={{
-                  deviceId: selectedDeviceId,
-                  width: { ideal: selectedResolution.width },
-                  height: { ideal: selectedResolution.height }
-                }}
-                className="webcam"
-              />
-              
-              {/* Mostrar la información de resolución actualizada */}
-              {renderResolutionInfo()}
+          {/* Mostrar estado de guardado */}
+          {saveStatus.message && (
+            <div className={`save-status ${saveStatus.type}`}>
+              <p>{saveStatus.message}</p>
             </div>
+          )}
 
-            {/* Información de guardado */}
-            {saving && (
-              <div className="saving-indicator">
-                <p>Guardando imagen...</p>
-              </div>
-            )}
-
-            {lastSaved && (
-              <div className="saved-info">
-                <p>Última imagen guardada: <strong>{lastSaved.fileName}</strong></p>
-                <p>Ruta: {lastSaved.path}</p>
-              </div>
-            )}
-
-            {errorMessage && (
-              <div className="error-message">
-                <p>{errorMessage}</p>
-              </div>
-            )}
-
-            {/* Controles principales */}
-            <div className="camera-controls">
-              <button 
-                onClick={captureAndSave} 
-                className="btn"
-                disabled={saving}
-              >
-                {saving ? 'Guardando...' : 'Capturar y Guardar'}
-              </button>
-              <button 
-                onClick={() => setIsCameraEnabled(false)} 
-                className="btn"
-                disabled={saving}
-              >
-                Cambiar cámara
-              </button>
+          {/* Contador de capturas */}
+          {captureCount > 0 && (
+            <div className="capture-count">
+              <p>Imágenes capturadas: {captureCount}</p>
             </div>
+          )}
+
+          {/* Controles principales */}
+          <div className="camera-controls">
+            <button 
+              onClick={capture} 
+              className="btn"
+              disabled={saveStatus.type === 'loading'}
+            >
+              {saveStatus.type === 'loading' ? 'Guardando...' : 'Capturar Foto'}
+            </button>
+            <button 
+              onClick={() => setIsCameraEnabled(false)} 
+              className="btn btn-secondary"
+              disabled={saveStatus.type === 'loading'}
+            >
+              Cambiar cámara
+            </button>
           </div>
-        )}
-        
-        {/* Vista previa de la imagen */}
-        {imgSrc && (
-          <div className="preview-container">
-            <h2>Última captura</h2>
-            <img src={imgSrc} alt="Captura" className="preview-image" />
+        </div>
+      )}
+
+      {/* Vista previa de la última imagen capturada */}
+      {imgSrc && (
+        <div className="preview-container">
+          <h2>Última captura</h2>
+          <div className="image-preview">
+            <img src={imgSrc} alt="Última captura" />
           </div>
-        )}
-      </div>
+        </div>
+      )}
     </div>
   );
 }
